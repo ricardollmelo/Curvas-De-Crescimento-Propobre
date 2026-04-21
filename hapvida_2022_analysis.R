@@ -662,6 +662,7 @@ write_xlsx(
 # ==========================================================
 
 library(fixest)
+library(ggplot2)
 
 # Cria et para TODAS as unidades (controles incluídos).
 # Para controles tratado=0, então i(et_trim, tratado) = 0 sempre —
@@ -700,72 +701,103 @@ modelos_es <- lapply(names(outcomes), function(y) {
 names(modelos_es) <- names(outcomes)
 
 # ----------------------------------------------------------
-# 5a) PDF com todos os gráficos (um por página)
+# Função auxiliar: extrai coeficientes e monta ggplot
 # ----------------------------------------------------------
-pdf("event_study_hapvida_2022.pdf", width = 10, height = 6)
+plot_es <- function(modelo, titulo, ref = -1L) {
+  ct <- coeftable(modelo, keep = "et_trim") |>
+    as.data.frame() |>
+    tibble::rownames_to_column("termo") |>
+    mutate(
+      et       = as.integer(str_extract(termo, "-?\\d+")),
+      ci_low   = Estimate - 1.96 * `Std. Error`,
+      ci_high  = Estimate + 1.96 * `Std. Error`
+    )
 
-for (nm in names(outcomes)) {
-  iplot(
-    modelos_es[[nm]],
-    main   = paste("Event Study —", outcomes[[nm]]),
-    xlab   = "Anos em relação à aquisição  (0 = primeiro ano pós | −1 = ano da aquisição)",
-    ylab   = "Coeficiente estimado (vs. 2022)",
-    col    = "steelblue",
-    pt.pch = 19,
-    ci.lwd = 2
+  # Adiciona o período de referência (coef = 0 por construção)
+  ref_row <- tibble(
+    termo = NA_character_, et = ref,
+    Estimate = 0, `Std. Error` = 0,
+    `t value` = NA_real_, `Pr(>|t|)` = NA_real_,
+    ci_low = 0, ci_high = 0
   )
-  abline(v = -0.5, lty = 2, col = "firebrick", lwd = 1.5)  # linha de corte pré/pós
-  abline(h = 0,    lty = 3, col = "gray50",    lwd = 1)
-  legend(
-    "topleft",
-    legend = c("Coeficiente (IC 95%)", "Início do tratamento"),
-    lty    = c(1, 2),
-    col    = c("steelblue", "firebrick"),
-    lwd    = c(2, 1.5),
-    bty    = "n"
-  )
+
+  dados_plot <- bind_rows(ct, ref_row) |> arrange(et)
+
+  ggplot(dados_plot, aes(x = et, y = Estimate)) +
+    geom_ribbon(aes(ymin = ci_low, ymax = ci_high),
+                fill = "steelblue", alpha = 0.2) +
+    geom_line(color = "steelblue", linewidth = 0.8) +
+    geom_point(color = "steelblue", size = 2.5) +
+    geom_vline(xintercept = -0.5, linetype = "dashed",
+               color = "firebrick", linewidth = 0.8) +
+    geom_hline(yintercept = 0, linetype = "dotted",
+               color = "gray40", linewidth = 0.7) +
+    scale_x_continuous(
+      breaks = seq(min(dados_plot$et), max(dados_plot$et), 1),
+      labels = function(x) ifelse(x == ref, paste0(x, "\n(ref)"), x)
+    ) +
+    labs(
+      title    = titulo,
+      subtitle = "Estimador TWFE — SE clusterizado por hospital",
+      x        = "Anos em relação à aquisição  (0 = 2023, primeiro ano pós | −1 = 2022, ano da aquisição)",
+      y        = "Coeficiente estimado (vs. ano da aquisição)",
+      caption  = "Faixa azul: IC 95%  |  Linha vermelha: início do tratamento"
+    ) +
+    theme_minimal(base_size = 12) +
+    theme(
+      plot.title    = element_text(face = "bold", size = 13),
+      plot.subtitle = element_text(color = "gray40", size = 10),
+      panel.grid.minor = element_blank()
+    )
 }
 
-dev.off()
-message("PDF salvo: event_study_hapvida_2022.pdf")
+# ----------------------------------------------------------
+# 5a) Exibe no painel do RStudio (um por vez — use Next/Prev)
+# ----------------------------------------------------------
+plots_es <- lapply(names(outcomes), function(nm) {
+  plot_es(modelos_es[[nm]], titulo = paste("Event Study —", outcomes[[nm]]))
+})
+names(plots_es) <- names(outcomes)
+
+# Exibe todos sequencialmente no painel de plots
+for (p in plots_es) print(p)
 
 # ----------------------------------------------------------
-# 5b) PNGs individuais (pasta event_studies/)
+# 5b) Salva PNGs individuais em event_studies/
 # ----------------------------------------------------------
 dir.create("event_studies", showWarnings = FALSE)
 
 for (nm in names(outcomes)) {
-  png(
+  ggsave(
     filename = file.path("event_studies", paste0("es_", nm, ".png")),
-    width = 1400, height = 700, res = 150
+    plot     = plots_es[[nm]],
+    width    = 10, height = 5.5, dpi = 150
   )
-  iplot(
-    modelos_es[[nm]],
-    main   = paste("Event Study —", outcomes[[nm]]),
-    xlab   = "Anos em relação à aquisição  (0 = primeiro ano pós | −1 = ano da aquisição)",
-    ylab   = "Coeficiente estimado (vs. 2022)",
-    col    = "steelblue",
-    pt.pch = 19,
-    ci.lwd = 2
-  )
-  abline(v = -0.5, lty = 2, col = "firebrick", lwd = 1.5)
-  abline(h = 0,    lty = 3, col = "gray50",    lwd = 1)
-  dev.off()
 }
-
-message("PNGs individuais salvos em: event_studies/")
+message("PNGs salvos em: event_studies/")
 
 # ----------------------------------------------------------
-# 5c) Tabela resumo dos coeficientes de cada event study
+# 5c) PDF com todos os gráficos (um por página)
+# ----------------------------------------------------------
+pdf("event_study_hapvida_2022.pdf", width = 10, height = 5.5)
+for (p in plots_es) print(p)
+dev.off()
+message("PDF salvo: event_study_hapvida_2022.pdf")
+
+# ----------------------------------------------------------
+# 5d) Tabela de coeficientes exportada para Excel
 # ----------------------------------------------------------
 coefs_es <- lapply(names(modelos_es), function(nm) {
-  coeftable(modelos_es[[nm]]) %>%
-    as.data.frame() %>%
-    tibble::rownames_to_column("termo") %>%
-    mutate(variavel = nm)
-}) %>%
-  bind_rows() %>%
-  select(variavel, termo, Estimate, `Std. Error`, `t value`, `Pr(>|t|)`)
+  coeftable(modelos_es[[nm]]) |>
+    as.data.frame() |>
+    tibble::rownames_to_column("termo") |>
+    mutate(
+      variavel = nm,
+      et       = as.integer(str_extract(termo, "-?\\d+"))
+    )
+}) |>
+  bind_rows() |>
+  select(variavel, et, Estimate, `Std. Error`, `t value`, `Pr(>|t|)`)
 
 write_xlsx(
   list("event_study_coefs" = coefs_es),
