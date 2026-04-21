@@ -651,3 +651,124 @@ write_xlsx(
   ),
   path = "painel_hapvida_2022_nevertreated.xlsx"
 )
+
+# ==========================================================
+# 5) Event Study — uma estimativa por variável
+# ==========================================================
+# Janela: -5 a 0  (dados chegam até 2023, logo apenas et=0 é pós)
+# et = 0  → 2023 (primeiro ano pós-aquisição)
+# et = -1 → 2022 (ano da aquisição — período de referência)
+# et = -2 → 2021, et = -3 → 2020, ...
+# ==========================================================
+
+library(fixest)
+
+# Cria et para TODAS as unidades (controles incluídos).
+# Para controles tratado=0, então i(et_trim, tratado) = 0 sempre —
+# eles apenas identificam os efeitos fixos de ano e unidade.
+painel_es <- painel_anual %>%
+  mutate(
+    et      = ano - 2023L,
+    et_trim = pmax(pmin(et, 0L), -5L)   # janela: -5 (≤2018) até 0 (2023)
+  )
+
+outcomes <- list(
+  num_medicos                 = "Número de Médicos",
+  n_prof_total                = "Total de Profissionais",
+  ch_total                    = "Carga Horária Hospitalar Total",
+  prop_prof_sus               = "Proporção Profissionais SUS",
+  razao_prof_leito            = "Razão Profissionais / Leito",
+  carga_hor_leito             = "Carga Horária por Leito",
+  n_servicos                  = "Número de Serviços Especializados",
+  leitos_total                = "Total de Leitos",
+  leitos_uti                  = "Leitos de UTI",
+  pct_uti                     = "% Leitos UTI",
+  complexidade_media          = "Complexidade Média dos Leitos",
+  dens_equip                  = "Densidade de Equipamentos Avançados",
+  n_equip_avancados           = "Equipamentos Avançados (n)",
+  salas_cirurgicas_principais = "Salas Cirúrgicas Principais",
+  salas_cirurgicas_total      = "Salas Cirúrgicas Total"
+)
+
+# Estima event study para cada outcome (ref = -1 = ano da aquisição = 2022)
+modelos_es <- lapply(names(outcomes), function(y) {
+  f <- as.formula(
+    paste0(y, " ~ i(et_trim, tratado, ref = -1) | id_estabelecimento_cnes + ano")
+  )
+  feols(f, data = painel_es, cluster = ~id_estabelecimento_cnes)
+})
+names(modelos_es) <- names(outcomes)
+
+# ----------------------------------------------------------
+# 5a) PDF com todos os gráficos (um por página)
+# ----------------------------------------------------------
+pdf("event_study_hapvida_2022.pdf", width = 10, height = 6)
+
+for (nm in names(outcomes)) {
+  iplot(
+    modelos_es[[nm]],
+    main   = paste("Event Study —", outcomes[[nm]]),
+    xlab   = "Anos em relação à aquisição  (0 = primeiro ano pós | −1 = ano da aquisição)",
+    ylab   = "Coeficiente estimado (vs. 2022)",
+    col    = "steelblue",
+    pt.pch = 19,
+    ci.lwd = 2
+  )
+  abline(v = -0.5, lty = 2, col = "firebrick", lwd = 1.5)  # linha de corte pré/pós
+  abline(h = 0,    lty = 3, col = "gray50",    lwd = 1)
+  legend(
+    "topleft",
+    legend = c("Coeficiente (IC 95%)", "Início do tratamento"),
+    lty    = c(1, 2),
+    col    = c("steelblue", "firebrick"),
+    lwd    = c(2, 1.5),
+    bty    = "n"
+  )
+}
+
+dev.off()
+message("PDF salvo: event_study_hapvida_2022.pdf")
+
+# ----------------------------------------------------------
+# 5b) PNGs individuais (pasta event_studies/)
+# ----------------------------------------------------------
+dir.create("event_studies", showWarnings = FALSE)
+
+for (nm in names(outcomes)) {
+  png(
+    filename = file.path("event_studies", paste0("es_", nm, ".png")),
+    width = 1400, height = 700, res = 150
+  )
+  iplot(
+    modelos_es[[nm]],
+    main   = paste("Event Study —", outcomes[[nm]]),
+    xlab   = "Anos em relação à aquisição  (0 = primeiro ano pós | −1 = ano da aquisição)",
+    ylab   = "Coeficiente estimado (vs. 2022)",
+    col    = "steelblue",
+    pt.pch = 19,
+    ci.lwd = 2
+  )
+  abline(v = -0.5, lty = 2, col = "firebrick", lwd = 1.5)
+  abline(h = 0,    lty = 3, col = "gray50",    lwd = 1)
+  dev.off()
+}
+
+message("PNGs individuais salvos em: event_studies/")
+
+# ----------------------------------------------------------
+# 5c) Tabela resumo dos coeficientes de cada event study
+# ----------------------------------------------------------
+coefs_es <- lapply(names(modelos_es), function(nm) {
+  coeftable(modelos_es[[nm]]) %>%
+    as.data.frame() %>%
+    tibble::rownames_to_column("termo") %>%
+    mutate(variavel = nm)
+}) %>%
+  bind_rows() %>%
+  select(variavel, termo, Estimate, `Std. Error`, `t value`, `Pr(>|t|)`)
+
+write_xlsx(
+  list("event_study_coefs" = coefs_es),
+  path = "event_study_coeficientes.xlsx"
+)
+message("Coeficientes exportados: event_study_coeficientes.xlsx")
