@@ -79,7 +79,7 @@ query_ids_controle <- "
 SELECT DISTINCT id_estabelecimento_cnes
 FROM `basedosdados.br_ms_cnes.estabelecimento`
 WHERE indicador_atencao_hospitalar = 1
-  AND ano BETWEEN 2010 AND 2023
+  AND ano BETWEEN 2015 AND 2025
   AND tipo_natureza_administrativa IN ('7')
 "
 
@@ -509,7 +509,7 @@ SELECT
 FROM `basedosdados.br_ms_cnes.estabelecimento` AS dados
 WHERE dados.id_estabelecimento_cnes IN ({cnes_sql})
   AND dados.indicador_atencao_hospitalar = 1
-  AND dados.ano BETWEEN 2010 AND 2023
+  AND dados.ano BETWEEN 2010 AND 2025
 ORDER BY id_estabelecimento_cnes, ano, mes
 ")
 
@@ -530,7 +530,7 @@ salas_mensal <- read_sql(query_salas, billing_project_id = get_billing_id()) %>%
 # ==========================================================
 
 ANO_INI <- 2010
-ANO_FIM <- 2023
+ANO_FIM <- 2025
 
 grid_mensal <- tidyr::expand_grid(
   id_estabelecimento_cnes = unique(cnes),
@@ -641,8 +641,8 @@ painel_anual <- painel_mensal %>%
 # 4) Salvar bases
 # ==========================================================
 
-saveRDS(painel_mensal, "painel_mensal_hapvida_2022_nevertreated_2010_2023.rds")
-saveRDS(painel_anual,  "painel_anual_hapvida_2022_nevertreated_2010_2023.rds")
+saveRDS(painel_mensal, "painel_mensal_hapvida_2022_nevertreated_2010_2025.rds")
+saveRDS(painel_anual,  "painel_anual_hapvida_2022_nevertreated_2010_2025.rds")
 
 write_xlsx(
   list(
@@ -655,10 +655,11 @@ write_xlsx(
 # ==========================================================
 # 5) Event Study — uma estimativa por variável
 # ==========================================================
-# Janela: -5 a 0  (dados chegam até 2023, logo apenas et=0 é pós)
-# et = 0  → 2023 (primeiro ano pós-aquisição)
+# Janela: -5 a +2  (dados chegam até 2025)
+# et =  0 → 2023 (primeiro ano pós-aquisição)
 # et = -1 → 2022 (ano da aquisição — período de referência)
-# et = -2 → 2021, et = -3 → 2020, ...
+# et = -2 → 2021,  et = -3 → 2020, ...
+# et =  1 → 2024,  et =  2 → 2025
 # ==========================================================
 
 library(fixest)
@@ -670,7 +671,7 @@ library(ggplot2)
 painel_es <- painel_anual %>%
   mutate(
     et      = ano - 2023L,
-    et_trim = pmax(pmin(et, 0L), -5L)   # janela: -5 (≤2018) até 0 (2023)
+    et_trim = pmax(pmin(et, 2L), -5L)   # janela: -5 (≤2018) até +2 (2025)
   )
 
 outcomes <- list(
@@ -739,7 +740,7 @@ plot_es <- function(modelo, titulo, ref = -1L) {
     labs(
       title    = titulo,
       subtitle = "Estimador TWFE — SE clusterizado por hospital",
-      x        = "Anos em relação à aquisição  (0 = 2023, primeiro ano pós | −1 = 2022, ano da aquisição)",
+      x        = "Anos em relação à aquisição  (0 = 2023 | −1 = 2022, ref. | +1 = 2024 | +2 = 2025)",
       y        = "Coeficiente estimado (vs. ano da aquisição)",
       caption  = "Faixa azul: IC 95%  |  Linha vermelha: início do tratamento"
     ) +
