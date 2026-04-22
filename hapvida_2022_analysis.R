@@ -63,9 +63,9 @@ aquisicao_completa <- tibble::tribble(
 ) %>%
   mutate(id_estabelecimento_cnes = as.character(id_estabelecimento_cnes))
 
-# ANÁLISE RESTRITA ÀS AQUISIÇÕES DE 2022
+# ANÁLISE RESTRITA ÀS AQUISIÇÕES DE 2021 E 2022
 aquisicao <- aquisicao_completa %>%
-  filter(ano_aquisicao == 2022)
+  filter(ano_aquisicao %in% c(2021, 2022))
 
 # =========================
 # 0) Criar CNES never-treated (controles)
@@ -641,38 +641,34 @@ painel_anual <- painel_mensal %>%
 # 4) Salvar bases
 # ==========================================================
 
-saveRDS(painel_mensal, "painel_mensal_hapvida_2022_nevertreated_2010_2025.rds")
-saveRDS(painel_anual,  "painel_anual_hapvida_2022_nevertreated_2010_2025.rds")
+saveRDS(painel_mensal, "painel_mensal_hapvida_2021_2022_nevertreated_2010_2025.rds")
+saveRDS(painel_anual,  "painel_anual_hapvida_2021_2022_nevertreated_2010_2025.rds")
 
 write_xlsx(
   list(
     "painel_mensal" = painel_mensal,
     "painel_anual"  = painel_anual
   ),
-  path = "painel_hapvida_2022_nevertreated.xlsx"
+  path = "painel_hapvida_2021_2022_nevertreated.xlsx"
 )
 
 # ==========================================================
-# 5) Event Study — uma estimativa por variável
+# 5) Event Study — Sun & Abraham (2021) — coortes 2021 e 2022
 # ==========================================================
-# Janela: -5 a +2  (dados chegam até 2025)
-# et =  0 → 2023 (primeiro ano pós-aquisição)
-# et = -1 → 2022 (ano da aquisição — período de referência)
-# et = -2 → 2021,  et = -3 → 2020, ...
-# et =  1 → 2024,  et =  2 → 2025
+# Com dois coortes o TWFE simples pode ter viés de heterogeneidade.
+# sunab() estima e agrega corretamente os efeitos por coorte.
+#
+# Convenção fixest/sunab:
+#   et =  0  → ano da aquisição (2021 ou 2022 conforme o coorte)
+#   et =  1  → primeiro ano pós-aquisição
+#   et = -1  → último ano pré (período de referência — ref.p = -.5)
+#
+# g_sa = Inf para never-treated; g_sa = ano_aquisicao para tratados.
 # ==========================================================
 
 library(fixest)
 library(ggplot2)
-
-# Cria et para TODAS as unidades (controles incluídos).
-# Para controles tratado=0, então i(et_trim, tratado) = 0 sempre —
-# eles apenas identificam os efeitos fixos de ano e unidade.
-painel_es <- painel_anual %>%
-  mutate(
-    et      = ano - 2023L,
-    et_trim = pmax(pmin(et, 2L), -5L)   # janela: -5 (≤2018) até +2 (2025)
-  )
+library(modelsummary)
 
 outcomes <- list(
   num_medicos                 = "Número de Médicos",
@@ -692,116 +688,100 @@ outcomes <- list(
   salas_cirurgicas_total      = "Salas Cirúrgicas Total"
 )
 
-# Estima event study para cada outcome (ref = -1 = ano da aquisição = 2022)
-modelos_es <- lapply(names(outcomes), function(y) {
+# g_sa: Inf = never-treated; ano_aquisicao = coorte de tratamento
+painel_sa <- painel_anual %>%
+  mutate(g_sa = if_else(tratado == 1L, as.numeric(ano_aquisicao), Inf))
+
+# Estima Sun & Abraham para cada outcome
+# sunab() agrega automaticamente as CATT de cada coorte×período
+modelos_sa <- lapply(names(outcomes), function(y) {
   f <- as.formula(
-    paste0(y, " ~ i(et_trim, tratado, ref = -1) | id_estabelecimento_cnes + ano")
+    paste0(y, " ~ sunab(g_sa, ano) | id_estabelecimento_cnes + ano")
   )
-  feols(f, data = painel_es, cluster = ~id_estabelecimento_cnes)
+  feols(f, data = painel_sa, cluster = ~id_estabelecimento_cnes)
 })
-names(modelos_es) <- names(outcomes)
+names(modelos_sa) <- names(outcomes)
 
 # ----------------------------------------------------------
-# Função auxiliar: extrai coeficientes e monta ggplot
-# ----------------------------------------------------------
-plot_es <- function(modelo, titulo, ref = -1L) {
-  ct <- coeftable(modelo, keep = "et_trim") |>
-    as.data.frame() |>
-    tibble::rownames_to_column("termo") |>
-    mutate(
-      et       = as.integer(str_extract(termo, "-?\\d+")),
-      ci_low   = Estimate - 1.96 * `Std. Error`,
-      ci_high  = Estimate + 1.96 * `Std. Error`
-    )
-
-  # Adiciona o período de referência (coef = 0 por construção)
-  ref_row <- tibble(
-    termo = NA_character_, et = ref,
-    Estimate = 0, `Std. Error` = 0,
-    `t value` = NA_real_, `Pr(>|t|)` = NA_real_,
-    ci_low = 0, ci_high = 0
-  )
-
-  dados_plot <- bind_rows(ct, ref_row) |> arrange(et)
-
-  ggplot(dados_plot, aes(x = et, y = Estimate)) +
-    geom_ribbon(aes(ymin = ci_low, ymax = ci_high),
-                fill = "steelblue", alpha = 0.2) +
-    geom_line(color = "steelblue", linewidth = 0.8) +
-    geom_point(color = "steelblue", size = 2.5) +
-    geom_vline(xintercept = -0.5, linetype = "dashed",
-               color = "firebrick", linewidth = 0.8) +
-    geom_hline(yintercept = 0, linetype = "dotted",
-               color = "gray40", linewidth = 0.7) +
-    scale_x_continuous(
-      breaks = seq(min(dados_plot$et), max(dados_plot$et), 1),
-      labels = function(x) ifelse(x == ref, paste0(x, "\n(ref)"), x)
-    ) +
-    labs(
-      title    = titulo,
-      subtitle = "Estimador TWFE — SE clusterizado por hospital",
-      x        = "Anos em relação à aquisição  (0 = 2023 | −1 = 2022, ref. | +1 = 2024 | +2 = 2025)",
-      y        = "Coeficiente estimado (vs. ano da aquisição)",
-      caption  = "Faixa azul: IC 95%  |  Linha vermelha: início do tratamento"
-    ) +
-    theme_minimal(base_size = 12) +
-    theme(
-      plot.title    = element_text(face = "bold", size = 13),
-      plot.subtitle = element_text(color = "gray40", size = 10),
-      panel.grid.minor = element_blank()
-    )
-}
-
-# ----------------------------------------------------------
-# 5a) Exibe no painel do RStudio (um por vez — use Next/Prev)
-# ----------------------------------------------------------
-plots_es <- lapply(names(outcomes), function(nm) {
-  plot_es(modelos_es[[nm]], titulo = paste("Event Study —", outcomes[[nm]]))
-})
-names(plots_es) <- names(outcomes)
-
-# Exibe todos sequencialmente no painel de plots
-for (p in plots_es) print(p)
-
-# ----------------------------------------------------------
-# 5b) Salva PNGs individuais em event_studies/
+# 5a) Exibe e salva — ggiplot() retorna ggplot (fixest ≥ 0.11)
 # ----------------------------------------------------------
 dir.create("event_studies", showWarnings = FALSE)
 
+plots_sa <- lapply(names(outcomes), function(nm) {
+  ggiplot(
+    modelos_sa[[nm]],
+    main     = paste("Event Study —", outcomes[[nm]]),
+    xlab     = "Anos em relação à aquisição  (0 = ano da aquisição | 1 = primeiro ano pós)",
+    ylab     = "Efeito estimado (agregado: coortes 2021 e 2022)",
+    ci_level = 0.95
+  ) +
+    geom_hline(yintercept = 0, linetype = "dotted",
+               color = "gray40", linewidth = 0.7) +
+    labs(
+      subtitle = "Sun & Abraham (2021) — SE clusterizado por hospital",
+      caption  = "Faixa: IC 95%  |  Linha vermelha: início do tratamento"
+    ) +
+    theme_minimal(base_size = 12) +
+    theme(
+      plot.title       = element_text(face = "bold", size = 13),
+      plot.subtitle    = element_text(color = "gray40", size = 10),
+      panel.grid.minor = element_blank()
+    )
+})
+names(plots_sa) <- names(outcomes)
+
+# Exibe no painel do RStudio (use as setas ← → para navegar)
+for (p in plots_sa) print(p)
+
+# PNGs individuais
 for (nm in names(outcomes)) {
   ggsave(
-    filename = file.path("event_studies", paste0("es_", nm, ".png")),
-    plot     = plots_es[[nm]],
+    filename = file.path("event_studies", paste0("sa_", nm, ".png")),
+    plot     = plots_sa[[nm]],
     width    = 10, height = 5.5, dpi = 150
   )
 }
 message("PNGs salvos em: event_studies/")
 
-# ----------------------------------------------------------
-# 5c) PDF com todos os gráficos (um por página)
-# ----------------------------------------------------------
-pdf("event_study_hapvida_2022.pdf", width = 10, height = 5.5)
-for (p in plots_es) print(p)
+# PDF completo
+pdf("event_study_hapvida_2021_2022.pdf", width = 10, height = 5.5)
+for (p in plots_sa) print(p)
 dev.off()
-message("PDF salvo: event_study_hapvida_2022.pdf")
+message("PDF salvo: event_study_hapvida_2021_2022.pdf")
 
 # ----------------------------------------------------------
-# 5d) Tabela de coeficientes exportada para Excel
+# 5b) DiD estático — ATT médio pós (TWFE, uma linha por variável)
 # ----------------------------------------------------------
-coefs_es <- lapply(names(modelos_es), function(nm) {
-  coeftable(modelos_es[[nm]]) |>
+modelos_did <- lapply(names(outcomes), function(y) {
+  feols(
+    as.formula(paste0(y, " ~ post | id_estabelecimento_cnes + ano")),
+    data    = painel_anual,
+    cluster = ~id_estabelecimento_cnes
+  )
+})
+names(modelos_did) <- names(outcomes)
+
+modelsummary(
+  modelos_did,
+  stars   = c("*" = .1, "**" = .05, "***" = .01),
+  gof_map = c("nobs", "r.squared"),
+  title   = "DiD Estático — Efeito das Aquisições Hapvida 2021-2022"
+)
+
+# ----------------------------------------------------------
+# 5c) Tabela de coeficientes do event study exportada para Excel
+# ----------------------------------------------------------
+coefs_sa <- lapply(names(modelos_sa), function(nm) {
+  coeftable(modelos_sa[[nm]]) |>
     as.data.frame() |>
     tibble::rownames_to_column("termo") |>
-    mutate(
-      variavel = nm,
-      et       = as.integer(str_extract(termo, "-?\\d+"))
-    )
+    mutate(variavel = nm)
 }) |>
   bind_rows() |>
-  select(variavel, et, Estimate, `Std. Error`, `t value`, `Pr(>|t|)`)
+  select(variavel, termo, Estimate, `Std. Error`, `t value`, `Pr(>|t|)`)
 
 write_xlsx(
-  list("event_study_coefs" = coefs_es),
-  path = "event_study_coeficientes.xlsx"
+  list("event_study_sa_coefs" = coefs_sa),
+  path = "event_study_sa_coeficientes.xlsx"
 )
-message("Coeficientes exportados: event_study_coeficientes.xlsx")
+message("Coeficientes exportados: event_study_sa_coeficientes.xlsx")
