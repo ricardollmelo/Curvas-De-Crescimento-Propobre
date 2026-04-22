@@ -688,9 +688,10 @@ outcomes <- list(
   salas_cirurgicas_total      = "Salas Cirúrgicas Total"
 )
 
-# g_sa: Inf = never-treated; ano_aquisicao = coorte de tratamento
+# g_sa: Inf = never-treated; ano_aquisicao + 1 = primeiro ano tratado
+# (análise começa 1 ano após a aquisição, alinhado com post e event_time do painel)
 painel_sa <- painel_anual %>%
-  mutate(g_sa = if_else(tratado == 1L, as.numeric(ano_aquisicao), Inf))
+  mutate(g_sa = if_else(tratado == 1L, as.numeric(ano_aquisicao + 1L), Inf))
 
 # Estima Sun & Abraham para cada outcome
 # sunab() agrega automaticamente as CATT de cada coorte×período
@@ -711,7 +712,7 @@ plots_sa <- lapply(names(outcomes), function(nm) {
   ggiplot(
     modelos_sa[[nm]],
     main     = paste("Event Study —", outcomes[[nm]]),
-    xlab     = "Anos em relação à aquisição  (0 = ano da aquisição | 1 = primeiro ano pós)",
+    xlab     = "Anos em relação à aquisição  (0 = primeiro ano pós | −1 = ano da aquisição)",
     ylab     = "Efeito estimado (agregado: coortes 2021 e 2022)",
     ci_level = 0.95
   ) +
@@ -805,7 +806,9 @@ library(did)
 painel_cs <- painel_anual %>%
   mutate(
     id_num = as.integer(factor(id_estabelecimento_cnes)),
-    g_cs   = if_else(tratado == 1L, as.integer(ano_aquisicao), 0L)
+    # g_cs = primeiro ano tratado = ano_aquisicao + 1
+    # (análise começa 1 ano após a aquisição, alinhado com post e event_time do painel)
+    g_cs   = if_else(tratado == 1L, as.integer(ano_aquisicao + 1L), 0L)
   )
 
 # ----------------------------------------------------------
@@ -858,7 +861,7 @@ plots_cs_dyn <- lapply(names(outcomes), function(nm) {
     labs(
       title    = paste("CS Event Study —", outcomes[[nm]]),
       subtitle = "Callaway & Sant'Anna (2021) — bandas simultâneas 95% | never-treated",
-      x        = "Event time  (0 = ano da aquisição | 1 = primeiro pós)",
+      x        = "Event time  (0 = primeiro ano pós | −1 = ano da aquisição)",
       y        = "ATT estimado"
     ) +
     theme_minimal(base_size = 12) +
