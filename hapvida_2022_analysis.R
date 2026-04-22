@@ -785,3 +785,188 @@ write_xlsx(
   path = "event_study_sa_coeficientes.xlsx"
 )
 message("Coeficientes exportados: event_study_sa_coeficientes.xlsx")
+
+# ==========================================================
+# 6) Callaway & Sant'Anna (2021) — pacote did
+# ==========================================================
+# Vantagens sobre Sun & Abraham neste contexto:
+#   - Usa explicitamente só never-treated como controle
+#   - Pré-teste formal conjunto de tendência pré-paralela
+#   - Agrega por event-time, por coorte e ATT geral
+#   - Bandas de confiança simultâneas (mais conservadoras)
+#
+# Convenção did: et=0 = ano da aquisição; et=1 = primeiro pós
+# g_cs = 0 para never-treated; g_cs = ano_aquisicao para tratados
+# id_num: did requer ID numérico único por unidade
+# ==========================================================
+
+library(did)
+
+painel_cs <- painel_anual %>%
+  mutate(
+    id_num = as.integer(factor(id_estabelecimento_cnes)),
+    g_cs   = if_else(tratado == 1L, as.integer(ano_aquisicao), 0L)
+  )
+
+# ----------------------------------------------------------
+# 6a) Estima ATT(g,t) para cada outcome
+#     control_group = "nevertreated": só never-treated como controle
+#     base_period   = "universal"   : período de referência comum
+#     est_method    = "reg"         : outcome regression (mais rápido
+#                                     que doubly-robust com muitos controles)
+# ----------------------------------------------------------
+message("Estimando CS — pode levar alguns minutos por variável...")
+
+cs_fits <- lapply(names(outcomes), function(y) {
+  message("  CS: ", y)
+  att_gt(
+    yname         = y,
+    tname         = "ano",
+    idname        = "id_num",
+    gname         = "g_cs",
+    data          = painel_cs,
+    control_group = "nevertreated",
+    base_period   = "universal",
+    est_method    = "reg",
+    clustervars   = "id_num",
+    print_details = FALSE
+  )
+})
+names(cs_fits) <- names(outcomes)
+
+# ----------------------------------------------------------
+# 6b) Agregações
+# ----------------------------------------------------------
+
+# Dinâmica (event study) — bandas de confiança simultâneas
+cs_dyn <- lapply(cs_fits, aggte, type = "dynamic",  cband = TRUE)
+names(cs_dyn) <- names(outcomes)
+
+# ATT geral (simples)
+cs_att <- lapply(cs_fits, aggte, type = "simple")
+names(cs_att) <- names(outcomes)
+
+# Por coorte (2021 vs 2022)
+cs_grp <- lapply(cs_fits, aggte, type = "group",   cband = TRUE)
+names(cs_grp) <- names(outcomes)
+
+# ----------------------------------------------------------
+# 6c) Plots de event study (ggdid retorna ggplot)
+# ----------------------------------------------------------
+plots_cs_dyn <- lapply(names(outcomes), function(nm) {
+  ggdid(cs_dyn[[nm]]) +
+    labs(
+      title    = paste("CS Event Study —", outcomes[[nm]]),
+      subtitle = "Callaway & Sant'Anna (2021) — bandas simultâneas 95% | never-treated",
+      x        = "Event time  (0 = ano da aquisição | 1 = primeiro pós)",
+      y        = "ATT estimado"
+    ) +
+    theme_minimal(base_size = 12) +
+    theme(
+      plot.title       = element_text(face = "bold", size = 13),
+      plot.subtitle    = element_text(color = "gray40", size = 10),
+      panel.grid.minor = element_blank()
+    )
+})
+names(plots_cs_dyn) <- names(outcomes)
+
+# Exibe no RStudio
+for (p in plots_cs_dyn) print(p)
+
+# PNGs
+for (nm in names(outcomes)) {
+  ggsave(
+    filename = file.path("event_studies", paste0("cs_dyn_", nm, ".png")),
+    plot     = plots_cs_dyn[[nm]],
+    width    = 10, height = 5.5, dpi = 150
+  )
+}
+
+# PDF event study CS
+pdf("cs_event_study_hapvida_2021_2022.pdf", width = 10, height = 5.5)
+for (p in plots_cs_dyn) print(p)
+dev.off()
+message("PDF CS event study salvo: cs_event_study_hapvida_2021_2022.pdf")
+
+# ----------------------------------------------------------
+# 6d) Plots por coorte (2021 vs 2022)
+# ----------------------------------------------------------
+plots_cs_grp <- lapply(names(outcomes), function(nm) {
+  ggdid(cs_grp[[nm]]) +
+    labs(
+      title    = paste("CS ATT por Coorte —", outcomes[[nm]]),
+      subtitle = "Callaway & Sant'Anna (2021) — never-treated",
+      x        = "Coorte (ano da aquisição)",
+      y        = "ATT estimado"
+    ) +
+    theme_minimal(base_size = 12) +
+    theme(
+      plot.title       = element_text(face = "bold", size = 13),
+      plot.subtitle    = element_text(color = "gray40", size = 10),
+      panel.grid.minor = element_blank()
+    )
+})
+names(plots_cs_grp) <- names(outcomes)
+
+for (p in plots_cs_grp) print(p)
+
+pdf("cs_por_coorte_hapvida_2021_2022.pdf", width = 10, height = 5.5)
+for (p in plots_cs_grp) print(p)
+dev.off()
+message("PDF CS por coorte salvo: cs_por_coorte_hapvida_2021_2022.pdf")
+
+# ----------------------------------------------------------
+# 6e) Tabela de ATT geral por variável + pré-teste
+# ----------------------------------------------------------
+att_geral <- tibble(
+  variavel = names(cs_att),
+  label    = unlist(outcomes[names(cs_att)]),
+  ATT      = sapply(cs_att, function(x) x$overall.att),
+  SE       = sapply(cs_att, function(x) x$overall.se)
+) %>%
+  mutate(
+    ci_low  = ATT - 1.96 * SE,
+    ci_high = ATT + 1.96 * SE,
+    p_value = 2 * pnorm(-abs(ATT / SE)),
+    sig     = case_when(
+      p_value < 0.01 ~ "***",
+      p_value < 0.05 ~ "**",
+      p_value < 0.10 ~ "*",
+      TRUE           ~ ""
+    )
+  )
+
+print(att_geral)
+
+# Pré-teste: Wald test de tendência pré-paralela (via dynamic, só pré)
+pre_tests <- lapply(names(cs_fits), function(nm) {
+  dyn <- cs_dyn[[nm]]
+  # coeficientes pré-tratamento (et < 0)
+  pre_idx <- which(dyn$egt < 0)
+  if (length(pre_idx) == 0) return(tibble(variavel = nm, W_stat = NA, p_pre = NA))
+  W  <- sum((dyn$att.egt[pre_idx] / dyn$se.egt[pre_idx])^2)
+  df <- length(pre_idx)
+  tibble(
+    variavel = nm,
+    label    = outcomes[[nm]],
+    W_stat   = round(W, 3),
+    df       = df,
+    p_pre    = round(pchisq(W, df = df, lower.tail = FALSE), 4)
+  )
+}) %>%
+  bind_rows()
+
+cat("\n--- Pré-teste de tendência pré-paralela (CS) ---\n")
+print(pre_tests)
+
+# ----------------------------------------------------------
+# 6f) Exporta para Excel
+# ----------------------------------------------------------
+write_xlsx(
+  list(
+    "att_geral"  = att_geral,
+    "pre_teste"  = pre_tests
+  ),
+  path = "cs_resultados.xlsx"
+)
+message("Resultados CS exportados: cs_resultados.xlsx")
